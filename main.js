@@ -150,20 +150,30 @@ function createQuad(w, l, material) {
   return mesh;
 }
 
+function roadOffsetX(z) {
+  const amp = 3.0 * params.roadCurviness;
+  const f = 0.03;
+  return amp * (fbm(z * f, 0.0, 4, 0.55) - 0.5) * 2.0;
+}
+
 const roadSegments = [];
 const laneSegments = [];
 for (let i = 0; i < numSegments; i++) {
+  const z = -i * segmentLength;
+  const x = roadOffsetX(z);
+  const y = sampleTerrainHeight(x, z) + 0.001;
+  const prevX = roadOffsetX(z + segmentLength);
+  const yaw = Math.atan2(x - prevX, segmentLength);
+
   const road = createQuad(roadWidth, segmentLength, roadMaterial);
-  road.position.z = -i * segmentLength;
-  road.position.y = sampleTerrainHeight(0, road.position.z) + 0.001;
-  road.rotation.y = 0;
+  road.position.set(x, y, z);
+  road.rotation.y = yaw;
   roadGroup.add(road);
   roadSegments.push(road);
 
   const centerLine = createQuad(laneLineWidth, segmentLength * 0.9, laneLineMaterial);
-  centerLine.position.z = road.position.z - segmentLength * 0.05;
-  centerLine.position.y = road.position.y + 0.009;
-  centerLine.rotation.y = 0;
+  centerLine.position.set(x, y + 0.009, z - segmentLength * 0.05);
+  centerLine.rotation.y = yaw;
   roadGroup.add(centerLine);
   laneSegments.push(centerLine);
 }
@@ -227,63 +237,49 @@ const speedLimitMs = () => params.speedLimitKph / 3.6;
 
 function resetCar() {
   velocity = 0;
-  heading = 0;
-  car.position.set(0, 0, 0);
-  roadCursor = new THREE.Vector2(0, 0);
-  roadDir = new THREE.Vector2(0, -1);
-  segmentIndex = 0;
+  // place car on the road at z=0 with road-aligned heading
+  const x0 = roadOffsetX(0);
+  const prevX0 = roadOffsetX(0 + segmentLength);
+  heading = Math.atan2(x0 - prevX0, segmentLength);
+  const y0 = sampleTerrainHeight(x0, 0) + 0.5;
+  car.position.set(x0, y0, 0);
   for (let i = 0; i < numSegments; i++) {
     const z = -i * segmentLength;
-    const y = sampleTerrainHeight(0, z) + 0.001;
-    roadSegments[i].position.set(0, y, z);
-    roadSegments[i].rotation.y = 0;
-    laneSegments[i].position.set(0, y + 0.009, z - segmentLength * 0.05);
-    laneSegments[i].rotation.y = 0;
+    const x = roadOffsetX(z);
+    const prevX = roadOffsetX(z + segmentLength);
+    const yaw = Math.atan2(x - prevX, segmentLength);
+    const y = sampleTerrainHeight(x, z) + 0.001;
+    roadSegments[i].position.set(x, y, z);
+    roadSegments[i].rotation.y = yaw;
+    laneSegments[i].position.set(x, y + 0.009, z - segmentLength * 0.05);
+    laneSegments[i].rotation.y = yaw;
   }
   refreshAllSegmentsAfterTerrainChange();
 }
 
-// Road generator state
-let roadCursor = new THREE.Vector2(0, 0);
-let roadDir = new THREE.Vector2(0, -1);
-let segmentIndex = 0;
-
 function advanceRoad() {
-  // Recycle first segment to end, move forward with curvature noise
+  // Recycle first segment to end, move forward along -Z
   const firstRoad = roadSegments.shift();
   const firstLane = laneSegments.shift();
   const lastRoad = roadSegments[roadSegments.length - 1];
-  const lastLane = laneSegments[laneSegments.length - 1];
 
-  segmentIndex++;
-  // Curvature: vary heading by noise
-  const t = segmentIndex * 0.05;
-  const curvature = (fbm(t, 0.0, 3, 0.65) - 0.5) * params.roadCurviness * 0.6;
-  const rot = curvature;
-  roadDir.rotateAround(new THREE.Vector2(0, 0), rot);
-  roadDir.normalize();
-  roadCursor.addScaledVector(roadDir, segmentLength);
+  const newZ = lastRoad.position.z - segmentLength;
+  const newX = roadOffsetX(newZ);
+  const prevX = lastRoad.position.x;
+  const yaw = Math.atan2(newX - prevX, segmentLength);
+  let newY = sampleTerrainHeight(newX, newZ) + 0.001;
+  newY = THREE.MathUtils.lerp(lastRoad.position.y, newY, 0.5);
 
-  const targetX = roadCursor.x;
-  const targetZ = roadCursor.y;
-  let targetY = sampleTerrainHeight(targetX, targetZ) + 0.001;
-  // Smooth vertical transitions versus previous segment
-  const prevY = lastRoad ? lastRoad.position.y : targetY;
-  targetY = THREE.MathUtils.lerp(prevY, targetY, 0.35);
-
-  // Align segment yaw to path direction
-  const yaw = Math.atan2(roadDir.x, -roadDir.y);
-
-  firstRoad.position.set(targetX, targetY, targetZ);
+  firstRoad.position.set(newX, newY, newZ);
   firstRoad.rotation.y = yaw;
-  firstLane.position.set(targetX, targetY + 0.009, targetZ - segmentLength * 0.05);
+  firstLane.position.set(newX, newY + 0.009, newZ - segmentLength * 0.05);
   firstLane.rotation.y = yaw;
 
   roadSegments.push(firstRoad);
   laneSegments.push(firstLane);
 
-  // Gently flatten terrain under this segment to avoid z-fighting and bumps
-  flattenTerrainUnderSegment(targetX, targetZ, targetY, yaw);
+  // Flatten terrain beneath new segment
+  flattenTerrainUnderSegment(newX, newZ, newY, yaw);
 }
 
 // Day/Night sky color interpolation
@@ -359,24 +355,20 @@ function tick() {
   const steerRate = corneringGrip * input.steer * (0.5 + 0.5 * Math.min(1, Math.abs(velocity) / speedLimitMs()));
   heading += steerRate * dt;
 
-  // Move car
-  const dx = Math.sin(heading) * velocity * dt;
-  const dz = Math.cos(heading) * velocity * dt;
+  // Move car forward in its local -Z direction
+  const forwardX = Math.sin(heading);
+  const forwardZ = Math.cos(heading);
+  const dx = forwardX * velocity * dt;
+  const dz = forwardZ * velocity * dt;
   car.position.x += dx;
   car.position.z -= dz;
   car.rotation.y = heading;
   headlights.target.position.set(Math.sin(heading) * 10, 0, -Math.cos(heading) * 10);
 
-  // Keep car near nearest road segment center by subtle attractor
-  let nearest = roadSegments[0];
-  let bestDz = Infinity;
-  for (let i = 0; i < roadSegments.length; i++) {
-    const dzAbs = Math.abs(roadSegments[i].position.z - car.position.z);
-    if (dzAbs < bestDz) { bestDz = dzAbs; nearest = roadSegments[i]; }
-  }
-  const nearestRoadX = nearest.position.x;
-  const off = car.position.x - nearestRoadX;
-  car.position.x += THREE.MathUtils.clamp(-off * 0.6, -1.0, 1.0) * dt;
+  // Keep car near road centerline derived from z
+  const desiredX = roadOffsetX(car.position.z);
+  const off = car.position.x - desiredX;
+  car.position.x += THREE.MathUtils.clamp(-off * 0.8, -2.5, 2.5) * dt;
 
   // Terrain height sampling for car y
   const carY = sampleTerrainHeight(car.position.x, car.position.z) + 0.5;
@@ -388,10 +380,11 @@ function tick() {
     advanceRoad();
   }
 
-  // Camera follow
-  const behind = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), heading).multiplyScalar(desiredCamOffset.z);
+  // Camera follow (3rd-person chase)
+  const backDir = new THREE.Vector3(-forwardX, 0, forwardZ).normalize();
+  const behind = backDir.clone().multiplyScalar(desiredCamOffset.z);
   const up = new THREE.Vector3(0, 1, 0).multiplyScalar(desiredCamOffset.y);
-  const right = new THREE.Vector3(1, 0, 0).multiplyScalar(desiredCamOffset.x);
+  const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), heading).multiplyScalar(desiredCamOffset.x);
   const desiredPos = new THREE.Vector3().copy(car.position).add(behind).add(up).add(right);
   const toTarget = new THREE.Vector3().subVectors(desiredPos, cameraRig.position);
   camVel.addScaledVector(toTarget, camStiffness * dt);
@@ -477,6 +470,21 @@ setProgress(0.8);
 renderer.render(scene, camera);
 setProgress(1);
 setTimeout(() => { if (loaderEl) loaderEl.style.display = "none"; }, 150);
+// initialize car on road and camera behind it
+(() => {
+  const x0 = roadOffsetX(0);
+  const prevX0 = roadOffsetX(0 + segmentLength);
+  heading = Math.atan2(x0 - prevX0, segmentLength);
+  const y0 = sampleTerrainHeight(x0, 0) + 0.5;
+  car.position.set(x0, y0, 0);
+  car.rotation.y = heading;
+  const forwardX = Math.sin(heading), forwardZ = Math.cos(heading);
+  const backDir = new THREE.Vector3(-forwardX, 0, forwardZ).normalize();
+  const behind = backDir.clone().multiplyScalar(desiredCamOffset.z);
+  const up = new THREE.Vector3(0, 1, 0).multiplyScalar(desiredCamOffset.y);
+  const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), heading).multiplyScalar(desiredCamOffset.x);
+  cameraRig.position.copy(car.position).add(behind).add(up).add(right);
+})();
 tick();
 
 
