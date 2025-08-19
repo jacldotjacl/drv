@@ -43,4 +43,27 @@ html, body {
   --title-text-color: #fff;
 }
 
+#loader {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bar {
+  width: 160px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.15);
+  overflow: hidden;
+}
+#loader-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80, #60a5fa);
+}
+#loader-pct {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
 
