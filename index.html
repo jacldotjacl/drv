@@ -8,11 +8,23 @@
     <link rel="preconnect" href="https://unpkg.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="stylesheet" href="./styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="overlay">
       <div class="title">DRV</div>
       <div class="subtitle">Arrow keys / WASD to drive • R to reset • G to toggle UI</div>
+      <div id="loader" aria-label="Loading">
+        <div class="bar"><div id="loader-fill"></div></div>
+        <div id="loader-pct">0%</div>
+      </div>
     </div>
 
     <canvas id="c"></canvas>
