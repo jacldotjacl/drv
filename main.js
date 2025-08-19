@@ -63,7 +63,10 @@ gui.add(params, "timeOfDay", 0, 24, 0.1).name("Time of Day");
 gui.add(params, "fogDensity", 0, 0.05, 0.001).name("Fog");
 gui.add(params, "clouds", 0, 1, 0.01).name("Clouds");
 gui.add(params, "roadCurviness", 0, 1, 0.01).name("Curviness");
-gui.add(params, "terrainRoughness", 0, 1, 0.01).name("Roughness");
+gui.add(params, "terrainRoughness", 0, 1, 0.01).name("Roughness").onFinishChange(() => {
+  regenerateTerrain();
+  refreshAllSegmentsAfterTerrainChange();
+});
 gui.add(params, "speedLimitKph", 40, 180, 1).name("Speed Limit");
 gui.add(params, "ambient", 0, 1, 0.01).name("Ambient");
 gui.add(params, "headlights").name("Headlights");
@@ -153,12 +156,14 @@ for (let i = 0; i < numSegments; i++) {
   const road = createQuad(roadWidth, segmentLength, roadMaterial);
   road.position.z = -i * segmentLength;
   road.position.y = sampleTerrainHeight(0, road.position.z) + 0.001;
+  road.rotation.y = 0;
   roadGroup.add(road);
   roadSegments.push(road);
 
   const centerLine = createQuad(laneLineWidth, segmentLength * 0.9, laneLineMaterial);
   centerLine.position.z = road.position.z - segmentLength * 0.05;
   centerLine.position.y = road.position.y + 0.009;
+  centerLine.rotation.y = 0;
   roadGroup.add(centerLine);
   laneSegments.push(centerLine);
 }
@@ -225,13 +230,17 @@ function resetCar() {
   heading = 0;
   car.position.set(0, 0, 0);
   roadCursor = new THREE.Vector2(0, 0);
+  roadDir = new THREE.Vector2(0, -1);
   segmentIndex = 0;
   for (let i = 0; i < numSegments; i++) {
     const z = -i * segmentLength;
     const y = sampleTerrainHeight(0, z) + 0.001;
     roadSegments[i].position.set(0, y, z);
+    roadSegments[i].rotation.y = 0;
     laneSegments[i].position.set(0, y + 0.009, z - segmentLength * 0.05);
+    laneSegments[i].rotation.y = 0;
   }
+  refreshAllSegmentsAfterTerrainChange();
 }
 
 // Road generator state
@@ -256,14 +265,25 @@ function advanceRoad() {
   roadCursor.addScaledVector(roadDir, segmentLength);
 
   const targetX = roadCursor.x;
-  const targetZ = -segmentIndex * segmentLength;
-  const targetY = sampleTerrainHeight(targetX, targetZ) + 0.001;
+  const targetZ = roadCursor.y;
+  let targetY = sampleTerrainHeight(targetX, targetZ) + 0.001;
+  // Smooth vertical transitions versus previous segment
+  const prevY = lastRoad ? lastRoad.position.y : targetY;
+  targetY = THREE.MathUtils.lerp(prevY, targetY, 0.35);
+
+  // Align segment yaw to path direction
+  const yaw = Math.atan2(roadDir.x, -roadDir.y);
 
   firstRoad.position.set(targetX, targetY, targetZ);
+  firstRoad.rotation.y = yaw;
   firstLane.position.set(targetX, targetY + 0.009, targetZ - segmentLength * 0.05);
+  firstLane.rotation.y = yaw;
 
   roadSegments.push(firstRoad);
   laneSegments.push(firstLane);
+
+  // Gently flatten terrain under this segment to avoid z-fighting and bumps
+  flattenTerrainUnderSegment(targetX, targetZ, targetY, yaw);
 }
 
 // Day/Night sky color interpolation
@@ -389,6 +409,53 @@ function sampleTerrainHeight(x, z) {
   return (fbm(x * 0.01, z * 0.01, 5, 0.55) - 0.5) * 6 * params.terrainRoughness;
 }
 
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function flattenTerrainUnderSegment(cx, cz, cy, yaw) {
+  const pos = groundGeom.attributes.position;
+  const halfL = segmentLength * 0.65; // overlap slightly to stitch
+  const halfW = roadWidth * 0.7;
+  const cos = Math.cos(yaw), sin = Math.sin(yaw);
+  // forward unit vector in XZ and right vector
+  const fwdX = Math.sin(yaw), fwdZ = -Math.cos(yaw);
+  const rightX = Math.cos(yaw), rightZ = Math.sin(yaw);
+  for (let i = 0; i < pos.count; i++) {
+    const vx = pos.getX(i);
+    const vz = pos.getZ(i);
+    const dx = vx - cx;
+    const dz = vz - cz;
+    const u = dx * fwdX + dz * fwdZ;    // along segment
+    const v = dx * rightX + dz * rightZ; // lateral from center
+    const wu = 1 - smoothstep(0, halfL, Math.abs(u));
+    const wv = 1 - smoothstep(0, halfW, Math.abs(v));
+    const w = wu * wv;
+    if (w > 0) {
+      const currentY = pos.getY(i);
+      const target = cy - 0.002; // tiny offset below road
+      const blended = currentY * (1 - w) + target * w;
+      pos.setY(i, blended);
+    }
+  }
+  pos.needsUpdate = true;
+  groundGeom.computeVertexNormals();
+}
+
+function refreshAllSegmentsAfterTerrainChange() {
+  for (let i = 0; i < roadSegments.length; i++) {
+    const seg = roadSegments[i];
+    const lane = laneSegments[i];
+    const y = sampleTerrainHeight(seg.position.x, seg.position.z) + 0.001;
+    seg.position.y = i === 0 ? y : THREE.MathUtils.lerp(roadSegments[i - 1].position.y, y, 0.35);
+    lane.position.y = seg.position.y + 0.009;
+    // apply flattening in current yaw
+    flattenTerrainUnderSegment(seg.position.x, seg.position.z, seg.position.y, seg.rotation.y || 0);
+  }
+}
+
 // Simple staged loader progress
 let bootProgress = 0;
 function setProgress(p) {
@@ -402,6 +469,7 @@ regenerateTerrain();
 setProgress(0.3);
 // simulate a couple of road advances to initialize positions
 for (let i = 0; i < 10; i++) advanceRoad();
+refreshAllSegmentsAfterTerrainChange();
 setProgress(0.6);
 onResize();
 setProgress(0.8);
