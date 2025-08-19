@@ -1,13 +1,16 @@
 // DRV — lightweight, chill driving experience
 
-import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
-import { OrbitControls } from "https://unpkg.com/three@0.161.0/examples/jsm/controls/OrbitControls.js";
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GUI } from "https://unpkg.com/lil-gui@0.19.2/dist/lil-gui.esm.js";
 
 // -----------------------------
 // Globals
 // -----------------------------
 const canvas = document.getElementById("c");
+const loaderEl = document.getElementById("loader");
+const loaderFill = document.getElementById("loader-fill");
+const loaderPct = document.getElementById("loader-pct");
 const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -122,7 +125,6 @@ function regenerateTerrain() {
   pos.needsUpdate = true;
   groundGeom.computeVertexNormals();
 }
-regenerateTerrain();
 
 // Procedural road as a ribbon mesh that extends forward; we recycle segments
 const roadWidth = 4;
@@ -225,9 +227,10 @@ function resetCar() {
   roadCursor = new THREE.Vector2(0, 0);
   segmentIndex = 0;
   for (let i = 0; i < numSegments; i++) {
-    roadSegments[i].position.set(0, 0, -i * segmentLength);
-    laneSegments[i].position.z = roadSegments[i].position.z - segmentLength * 0.05;
-    laneSegments[i].position.x = 0;
+    const z = -i * segmentLength;
+    const y = sampleTerrainHeight(0, z) + 0.001;
+    roadSegments[i].position.set(0, y, z);
+    laneSegments[i].position.set(0, y + 0.009, z - segmentLength * 0.05);
   }
 }
 
@@ -386,8 +389,26 @@ function sampleTerrainHeight(x, z) {
   return (fbm(x * 0.01, z * 0.01, 5, 0.55) - 0.5) * 6 * params.terrainRoughness;
 }
 
-// Kick off
+// Simple staged loader progress
+let bootProgress = 0;
+function setProgress(p) {
+  bootProgress = Math.max(0, Math.min(1, p));
+  if (loaderFill) loaderFill.style.width = `${Math.floor(bootProgress * 100)}%`;
+  if (loaderPct) loaderPct.textContent = `${Math.floor(bootProgress * 100)}%`;
+}
+
+setProgress(0.1);
+regenerateTerrain();
+setProgress(0.3);
+// simulate a couple of road advances to initialize positions
+for (let i = 0; i < 10; i++) advanceRoad();
+setProgress(0.6);
 onResize();
+setProgress(0.8);
+// first render to warm up
+renderer.render(scene, camera);
+setProgress(1);
+setTimeout(() => { if (loaderEl) loaderEl.style.display = "none"; }, 150);
 tick();
 
 
